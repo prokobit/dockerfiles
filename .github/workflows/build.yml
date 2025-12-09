@@ -1,0 +1,106 @@
+name: Build Docker Images
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      path:
+        description: 'Path to Dockerfile directory'
+        required: false
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      paths: ${{ steps.changes.outputs.paths }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Detect changed Dockerfiles
+        id: changes
+        run: .github/scripts/detect-changes.sh "${{ github.event.inputs.path }}"
+  build:
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    if: needs.detect-changes.outputs.paths != '' && needs.detect-changes.outputs.paths != '[]'
+    strategy:
+      matrix:
+        path: ${{ fromJson(needs.detect-changes.outputs.paths) }}
+      fail-fast: false
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Calculate version
+        id: version
+        run: .github/scripts/calculate-version.sh "${{ matrix.path }}" "${{ github.run_number }}"
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.path }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.version }}
+      
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ matrix.path }}
+          file: ./${{ matrix.path }}/Dockerfile
+          push: ${{ github.ref == 'refs/heads/master' || github.ref == format('refs/tags/{0}-{1}', matrix.path, steps.version.outputs.version) }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: |
+            linux/amd64
+            linux/arm64
+      
+      - name: Build Summary
+        if: always()
+        run: |
+          IMAGE_NAME="${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.path }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          FULL_TAG="${IMAGE_NAME}:${VERSION}"
+          PUSHED="${{ github.ref == 'refs/heads/master' || github.ref == format('refs/tags/{0}-{1}', matrix.path, steps.version.outputs.version) }}"
+          
+          echo "## 🐳 Image: ${{ matrix.path }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image:** \`${FULL_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** \`${VERSION}\`" >> $GITHUB_STEP_SUMMARY
+          if [ "$PUSHED" == "true" ]; then
+            echo "- **Status:** ✅ Built and pushed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Status:** ✅ Built (not pushed)" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "✅ Image: ${FULL_TAG}"
+
