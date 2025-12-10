@@ -42,6 +42,41 @@ if [ -n "$INPUT_PATH" ]; then
     echo "Error: Dockerfile not found at $DOCKERFILE_PATH"
     exit 1
   fi
+# Check if we're on a tag (format: path-version)
+elif git describe --tags --exact-match HEAD >/dev/null 2>&1; then
+  TAG_NAME=$(git describe --tags --exact-match HEAD)
+  echo "Detected tag: $TAG_NAME"
+  
+  # Extract path from tag (tag format: path-version, e.g., imgA-1.0.0)
+  # Find matching dockerfile directory
+  ALL_DOCKERFILE_DIRS=$(find_all_dockerfiles)
+  FOUND_PATH=""
+  
+  while IFS= read -r dir; do
+    if [ -n "$dir" ]; then
+      # Check if tag starts with path followed by a hyphen
+      if [[ "$TAG_NAME" == "${dir}-"* ]]; then
+        FOUND_PATH="$dir"
+        echo "Extracted path from tag: $FOUND_PATH"
+        break
+      fi
+    fi
+  done <<< "$ALL_DOCKERFILE_DIRS"
+  
+  if [ -n "$FOUND_PATH" ]; then
+    # Verify the path has a Dockerfile
+    if [ -f "$FOUND_PATH/Dockerfile" ] || [ -f "$FOUND_PATH/dockerfile" ]; then
+      PATHS_JSON="[\"$FOUND_PATH\"]"
+      echo "Building from tag: $FOUND_PATH"
+    else
+      echo "Error: Dockerfile not found at $FOUND_PATH"
+      exit 1
+    fi
+  else
+    echo "Error: Could not extract path from tag $TAG_NAME"
+    echo "Tag should be in format: path-version (e.g., imgA-1.0.0)"
+    exit 1
+  fi
 else
   # Detect any changed files in subfolders
   # Check what changed in the current commit (works for both push and PR)
