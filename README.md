@@ -1,153 +1,87 @@
 # Dockerfiles Monorepo
 
-A monorepo containing multiple Dockerfiles with automated builds via GitHub Actions.
+Container images built with Podman and published to GitHub Container Registry by GitHub Actions.
 
 ## Structure
 
-Each Dockerfile should be in its own directory with the following structure:
+Each image lives in its own top-level directory:
 
 ```
-project-name/
+img-a/
 ├── Dockerfile
-├── version.txt          # Optional: version for tagging (e.g., "1.0.0")
-├── (other files needed for the build)
-└── README.md            # Optional
+├── version.txt            # required: base version, e.g. "1.0.0"
+├── structure-test.yaml    # optional: container-structure-test checks run in CI
+└── (other files needed for the build)
 ```
 
-## GitHub Actions Workflow
+### Images that depend on other images
 
-### Build Workflow (`build.yml`)
-
-Automatically builds Docker images when files change in any subfolder directory.
-
-**Features:**
-- ✅ Detects ANY changes in subfolders (not just Dockerfile changes)
-- ✅ Only builds directories that contain Dockerfiles and have changes
-- ✅ Builds multi-platform images (linux/amd64, linux/arm64)
-- ✅ Uses GitHub Container Registry (ghcr.io)
-- ✅ Implements build caching for faster builds
-- ✅ Automatic version tagging from `version.txt`
-- ✅ Manual workflow triggers with optional path parameter
-
-**How it works:**
-1. Detects what changed in the current commit
-2. Finds all directories containing Dockerfiles
-3. Builds only directories that have changes
-4. Extracts version from `version.txt` (if present) and tags the image
-5. Pushes images to GitHub Container Registry (only on master branch)
-
-**Manual Trigger:**
-You can manually trigger the workflow and optionally specify a single directory path:
-- Leave empty to detect and build all changed directories
-- Specify a path like `img1` to build only that directory
-
-## Usage
-
-### Adding a New Dockerfile
-
-1. Create a new directory for your project:
-   ```bash
-   mkdir -p my-project
-   ```
-
-2. Add your `Dockerfile` and any necessary files:
-   ```bash
-   cd my-project
-   # Add Dockerfile and other files
-   ```
-
-3. (Optional) Add a `version.txt` file with your version:
-   ```bash
-   echo "1.0.0" > version.txt
-   ```
-
-4. Commit and push:
-   ```bash
-   git add my-project/
-   git commit -m "Add my-project dockerfile"
-   git push
-   ```
-
-5. The GitHub Action will automatically detect and build your new Dockerfile.
-
-### Version Management
-
-Each directory can have a `version.txt` file containing the version number (e.g., `1.0.0`). This version will be used to tag the Docker image.
-
-**To update a version:**
-```bash
-echo "1.0.1" > imgA/version.txt
-git add imgA/version.txt
-git commit -m "Bump imgA to 1.0.1"
-git push
-```
-
-The workflow will automatically detect the change and rebuild the image with the new version tag.
-
-### Image Naming Convention
-
-Images are published to GitHub Container Registry with the following naming:
-- Registry: `ghcr.io`
-- Owner: Your GitHub username/organization
-- Image name: Directory path (e.g., `imgA` becomes `ghcr.io/username/imgA`)
-
-### Tags
-
-Images are tagged with:
-- **Version tag** (from `version.txt`) - e.g., `1.0.0` (if version.txt exists)
-- **Branch name** - e.g., `feature-branch`
-- **Branch + SHA** - e.g., `feature-branch-a1b2c3d`
-- **Latest** - Only on default branch (master)
-
-Example: If `imgA/version.txt` contains `1.0.0`, the image will be tagged as:
-- `ghcr.io/username/imgA:1.0.0`
-
-
-### Using Version in Dockerfile
-
-The version is passed as a build argument `VERSION` to your Dockerfile. You can use it like this:
+If an image is built `FROM` another image of this repo, declare it in the Dockerfile header and take the parent through `BASE_IMAGE`:
 
 ```dockerfile
-ARG VERSION
-LABEL version="$VERSION"
-
-# Your Dockerfile content...
+# depends-on: img-a
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
 ```
 
-## Local Development
+The build passes the parent's reference as `BASE_IMAGE`. Only one parent per image is supported. Cycles and unknown parents fail the build.
+When a parent changes, its dependents are rebuilt too, in dependency order.
 
-To build a dockerfile locally:
+## Local development
+
+Requires `podman` (falls back to `docker` if podman is missing).
 
 ```bash
-cd imgA
-docker build -t my-imgA .
-docker run my-imgA
+make build-all        # every image, parents first
+make build-img-a      # one image plus its ancestors
+make lint             # hadolint
+make test             # tests for the CI scripts
 ```
 
-## CI/CD Features
+Images are tagged `localhost/<dir>:dev`.
 
-- ✅ Automatic change detection (any file change in subfolder triggers build)
-- ✅ Multi-platform builds (AMD64 and ARM64)
-- ✅ Build caching for faster builds
-- ✅ GitHub Container Registry integration
-- ✅ Manual workflow triggers
-- ✅ Version tagging from `version.txt`
-- ✅ Version passed as build argument to Dockerfile
+## CI (`.github/workflows/build.yml`)
 
-## How Change Detection Works
+On every push (or manual dispatch with an optional `path`):
 
-The workflow detects changes by:
-1. Comparing the current commit (HEAD) with its parent (HEAD~1)
-2. Finding all directories that contain Dockerfiles
-3. Checking if any changed files are in those directories
-4. Building only directories with changes
+1. `detect-changes.sh` finds changed image directories by diffing from the push's base commit (`github.event.before`; for new branches the merge-base with master), adds all images that depend on them, and returns them in build order.
+   A tag `<dir>-<version>` on HEAD builds only that directory.
+2. `lint` (hadolint) and `test-scripts` (`tests/run.sh`) run in parallel.
+3. `scripts/ci-build.sh` builds the images one after another with Podman, runs `structure-test.yaml` if present, and pushes when appropriate. Layer cache is stored in the registry under `ghcr.io/<owner>/cache/<dir>`.
 
-**Important:** If no changes are detected, nothing is built. The workflow will not build all images by default.
+Images are published as `ghcr.io/<owner>/<dir>`; the owner is lowercased.
 
-## Contributing
+## Versions and tags
 
-1. Create a new directory for your Dockerfile
-2. Add your Dockerfile and necessary files
-3. Optionally add a `version.txt` file with your version
-4. Optionally add a README.md in your directory explaining the image
-5. Commit and push - the workflow will automatically detect and build!
+`<dir>/version.txt` holds the base version (required). The pushed tag is:
+
+| Situation | Tag | Pushed |
+|---|---|---|
+| Git tag `<dir>-X.Y.Z` on HEAD | `X.Y.Z` | yes |
+| Push to `master` | `X.Y.Z-dev.<run number>` | yes |
+| Any other branch | `X.Y.Z` | no |
+
+There is no `latest` tag and no SHA tag. The version is also passed to the Dockerfile as `ARG VERSION` (the images set it as the `org.opencontainers.image.version` label).
+
+A dependent image whose parent was not rebuilt in the same run uses `<parent>:<parent's version.txt>`, i.e. the released version of the parent.
+
+### Release
+
+```bash
+echo "1.0.1" > img-a/version.txt
+git commit -am "Bump img-a to 1.0.1" && git push   # merge to master: publishes 1.0.1-dev.N
+git tag img-a-1.0.1 && git push origin img-a-1.0.1  # publishes 1.0.1
+```
+
+Releasing a parent does not release its dependents.
+
+## Maintenance
+
+- `prune-dev-tags.yml` runs weekly and deletes old `-dev.N` versions, keeping the newest 10 per image. Versions that have any non-dev tag are never deleted.
+- `renovate.json` configures Renovate to update base images and GitHub Actions (requires the Renovate GitHub app).
+
+## Adding an image
+
+1. Create `my-image/` with a `Dockerfile` and `version.txt`.
+2. Optionally add `# depends-on:` and `structure-test.yaml`.
+3. Commit and push; CI picks it up automatically.

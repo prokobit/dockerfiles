@@ -2,8 +2,32 @@
 
 set -e
 
-# Path parameter (optional)
-INPUT_PATH="$1"
+# Path parameter (optional) and base SHA of the push (optional, e.g. github.event.before)
+INPUT_PATH="${1:-}"
+BASE_SHA="${2:-${BASE_SHA:-}}"
+GRAPH="$(cd "$(dirname "$0")" && pwd)/graph.sh"
+
+# Pick the commit to diff against: the push base if usable, else the merge-base
+# with master (new branches), else the parent commit.
+resolve_base() {
+  local base=""
+  if [ -n "$BASE_SHA" ] && [[ ! "$BASE_SHA" =~ ^0+$ ]] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+    base="$BASE_SHA"
+  else
+    for ref in origin/master master; do
+      if git rev-parse --verify --quiet "$ref" >/dev/null; then
+        base=$(git merge-base HEAD "$ref" 2>/dev/null || true)
+        # On master itself the merge-base is HEAD: nothing to diff, fall back to parent
+        [ "$base" == "$(git rev-parse HEAD)" ] && base=""
+        [ -n "$base" ] && break
+      fi
+    done
+  fi
+  if [ -z "$base" ]; then
+    base=$(git rev-parse --verify --quiet HEAD~1 || true)
+  fi
+  echo "$base"
+}
 
 # Function to find all dockerfiles
 find_all_dockerfiles() {
@@ -80,11 +104,11 @@ elif git describe --tags --exact-match HEAD >/dev/null 2>&1; then
     exit 1
   fi
 else
-  # Detect any changed files in subfolders
-  # Check what changed in the current commit (works for both push and PR)
-  PARENT_SHA=$(git rev-parse --verify --quiet HEAD~1 2>/dev/null || echo "")
-  if [ -n "$PARENT_SHA" ]; then
-    CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || true)
+  # Detect any changed files in subfolders since the base commit
+  DIFF_BASE=$(resolve_base)
+  if [ -n "$DIFF_BASE" ]; then
+    echo "Diffing against: $DIFF_BASE"
+    CHANGED_FILES=$(git diff --name-only "$DIFF_BASE" HEAD 2>/dev/null || true)
   else
     # First commit - show all files in the commit
     CHANGED_FILES=$(git diff-tree --root --no-commit-id --name-only -r HEAD 2>/dev/null || true)
@@ -116,7 +140,8 @@ else
     if [ -z "$PATHS_TO_BUILD" ]; then
       PATHS_JSON="[]"
     else
-      PATHS_JSON=$(echo "$PATHS_TO_BUILD" | grep -v '^$' | sort -u | create_json_array)
+      # Add images that depend on the changed ones; output is in build order
+      PATHS_JSON=$(echo "$PATHS_TO_BUILD" | grep -v '^$' | sort -u | xargs "$GRAPH" closure | create_json_array)
     fi
   fi
 fi

@@ -1,0 +1,9 @@
+schemaVersion: 2.0.0
+fileExistenceTests:
+  - name: entrypoint script is executable
+    path: /app/run.sh
+    shouldExist: true
+    permissions: "-rwxr-xr-x"
+metadataTest:
+  entrypoint: ["/app/run.sh"]
+  workdir: /app

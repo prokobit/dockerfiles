@@ -4,35 +4,38 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Layout
 
-Monorepo of independent Docker images. Each top-level directory (`img-a`, `img-b`, `img-c`) is one image: `Dockerfile`, `run.sh` (entrypoint, ends with `exec "$@"`), and a **required** `version.txt`. The build context is that directory only. The images are currently Rocky Linux 10-minimal. There is no linter.
+Monorepo of container images. Each top-level directory (`img-a`, `img-b`, `img-c`) is one image: `Dockerfile`, `run.sh` (entrypoint, ends with `exec "$@"`), a **required** `version.txt`, and an optional `structure-test.yaml`. The build context is that directory only. Images are built with Podman (the scripts fall back to docker when podman is absent). There is no `bake`/buildx: everything must work with Podman.
 
-Test the CI scripts with `tests/run.sh` (plain bash, no dependencies). It builds throwaway git repos and runs `detect-changes.sh` and `calculate-version.sh` against them. Add a case there when changing either script.
+Images that are built `FROM` another image of this repo declare `# depends-on: <dir>` in the Dockerfile header and take the parent via `ARG BASE_IMAGE`; only one parent is supported. `scripts/graph.sh` derives the dependency graph from those comments.
 
-Build locally:
+## Commands
 
 ```bash
-cd img-a && docker build --build-arg VERSION=1.0.0 -t img-a . && docker run img-a <cmd>
+make build-all        # all images, parents first
+make build-img-a      # one image plus its ancestors
+make lint             # hadolint (must be installed)
+make test             # == tests/run.sh
 ```
 
-## CI (`.github/workflows/build.yml` + `.github/scripts/`)
+`tests/run.sh` (plain bash, no dependencies) builds throwaway git repos and tests `graph.sh`, `detect-changes.sh`, `calculate-version.sh`, `build.sh` (with a fake container engine) and `prune-dev-tags.sh`. Add a case there when changing any of these scripts. It does not run real builds or the GitHub workflows.
 
-The workflow runs on every push and on manual dispatch. It has two stages, `detect-changes` and then a matrix `build` over the detected dirs. Any directory containing a `Dockerfile*` counts as an image.
+## CI (`.github/workflows/` + `scripts/`)
 
-- `detect-changes.sh` chooses what to build, in priority order:
-  1. an explicit path (the `workflow_dispatch` input)
-  2. a git tag `<dir>-<version>` on HEAD, which builds that dir
-  3. otherwise, dirs with files changed in `HEAD~1..HEAD`
+`build.yml` runs on every push and manual dispatch: `detect-changes` -> (`lint`, `test-scripts`) -> `build`.
 
-  Only the last commit is diffed, so changes in earlier commits of a multi-commit push are missed. When several dirs match a tag, the longest name wins (`img-a` over `img`).
-- `calculate-version.sh` reads `<dir>/version.txt`. The script fails if the file is missing or empty, even though the README calls it optional. The resulting version is:
-  - `X.Y.Z` if tag `<dir>-X.Y.Z` points at HEAD
-  - `X.Y.Z-dev.<run_number>` on master
-  - `X.Y.Z` on other branches
-- The build is multi-arch (amd64/arm64) and passes `VERSION` as a build arg. It pushes to `ghcr.io/<owner>/<dir>` only on master or when the ref is the matching `<dir>-<version>` tag. Other branches build without pushing.
+- `detect-changes.sh [path] [base_sha]` chooses what to build, in priority order:
+  1. an explicit path (the `workflow_dispatch` input): only that dir
+  2. a git tag `<dir>-<version>` on HEAD: only that dir (the longest matching dir name wins, `img-a` over `img`)
+  3. otherwise, dirs with files changed since the base commit, plus all their transitive dependents. The base is `github.event.before`; for a new branch (zero SHA) the merge-base with master; otherwise `HEAD~1`.
 
-Release flow: bump `<dir>/version.txt`, merge to master (publishes `-dev.N`), then tag `<dir>-<version>` and push the tag to publish the clean version.
+  The result is a JSON array in build order (parents first).
+- `calculate-version.sh` reads `<dir>/version.txt` (fails if missing or empty): `X.Y.Z` if tag `<dir>-X.Y.Z` is on HEAD, `X.Y.Z-dev.<run_number>` on master, `X.Y.Z` on other branches.
+- `scripts/ci-build.sh` builds the array sequentially (so dependents find their parent), via `scripts/build.sh`, which passes `VERSION` and `BASE_IMAGE` build args and uses a registry cache at `<prefix>/cache/<dir>`. A parent not built in the same run resolves to `<prefix>/<parent>:<parent version.txt>`. Pushes to `ghcr.io/<lowercased owner>/<dir>` only on master or the matching tag. No `latest` and no SHA tags.
+- `prune-dev-tags.yml` (weekly) deletes old `-dev.N` versions via `scripts/prune-dev-tags.sh`, keeping the newest 10 and never touching versions with a non-dev tag.
+
+Release flow: bump `<dir>/version.txt`, merge to master (publishes `-dev.N`), then tag `<dir>-<version>` and push the tag to publish the clean version. Releasing a parent does not release its dependents.
 
 ## Gotchas
 
-- The README examples use `imgA`, but the real directory names are `img-a`, `img-b` and `img-c`.
-- `.dockerignore` excludes `*.md` and `.github`, so don't rely on them in a build.
+- Podman is not installed on every dev machine; docker is used as fallback, so the Podman code paths (`podman login`, `podman save`, `--cache-to`) are only exercised in CI.
+- `.dockerignore` at the repo root is not used (build contexts are the subdirectories).
