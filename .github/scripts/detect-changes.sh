@@ -56,13 +56,15 @@ elif git describe --tags --exact-match HEAD >/dev/null 2>&1; then
     if [ -n "$dir" ]; then
       # Check if tag starts with path followed by a hyphen
       if [[ "$TAG_NAME" == "${dir}-"* ]]; then
-        FOUND_PATH="$dir"
-        echo "Extracted path from tag: $FOUND_PATH"
-        break
+        # Prefer the longest match so "img-a-1.0.0" picks img-a over img
+        if [ ${#dir} -gt ${#FOUND_PATH} ]; then
+          FOUND_PATH="$dir"
+        fi
       fi
     fi
   done <<< "$ALL_DOCKERFILE_DIRS"
-  
+  [ -n "$FOUND_PATH" ] && echo "Extracted path from tag: $FOUND_PATH"
+
   if [ -n "$FOUND_PATH" ]; then
     # Verify the path has a Dockerfile
     if [ -f "$FOUND_PATH/Dockerfile" ] || [ -f "$FOUND_PATH/dockerfile" ]; then
@@ -80,12 +82,12 @@ elif git describe --tags --exact-match HEAD >/dev/null 2>&1; then
 else
   # Detect any changed files in subfolders
   # Check what changed in the current commit (works for both push and PR)
-  PARENT_SHA=$(git rev-parse HEAD~1 2>/dev/null || echo "")
+  PARENT_SHA=$(git rev-parse --verify --quiet HEAD~1 2>/dev/null || echo "")
   if [ -n "$PARENT_SHA" ]; then
     CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || true)
   else
     # First commit - show all files in the commit
-    CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null || true)
+    CHANGED_FILES=$(git diff-tree --root --no-commit-id --name-only -r HEAD 2>/dev/null || true)
   fi
   if [ -z "$CHANGED_FILES" ]; then
     # No changes detected, build nothing
